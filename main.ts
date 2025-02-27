@@ -1,17 +1,75 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting, normalizePath } from 'obsidian';
 
 // Remember to rename these classes and interfaces!
 
 interface ExportPackSettings {
 	exportPath: string;
+	linkFormat: 'wiki' | 'markdown' | 'html';
 }
 
 const DEFAULT_SETTINGS: ExportPackSettings = {
-	exportPath: 'exports'
+	exportPath: 'exports',
+	linkFormat: 'markdown'
 }
 
 export default class MarkdownExportPlugin extends Plugin {
 	settings: ExportPackSettings;
+
+	// 转换链接格式
+	convertLinks(content: string, fileCache: any, links: Set<string>): string {
+		const { linkFormat } = this.settings;
+		let convertedContent = content;
+
+		// 处理内部链接
+		if (fileCache.links) {
+			fileCache.links.forEach((link: any) => {
+				const originalLink = link.original;
+				const linkText = link.displayText || link.link;
+				const linkPath = link.link;
+
+				let newLink = '';
+				switch (linkFormat) {
+					case 'markdown':
+						newLink = `[${linkText}](${linkPath})`;
+						break;
+					case 'html':
+						newLink = `<a href="${linkPath}">${linkText}</a>`;
+						break;
+					case 'wiki':
+					default:
+						newLink = `[[${linkPath}]]`;
+				}
+
+				convertedContent = convertedContent.replace(originalLink, newLink);
+			});
+		}
+
+		// 处理嵌入文件（包括图片）
+		if (fileCache.embeds) {
+			fileCache.embeds.forEach((embed: any) => {
+				const originalEmbed = embed.original;
+				const embedPath = embed.link;
+				const isImage = /\.(png|jpg|jpeg|gif|svg)$/i.test(embedPath);
+
+				let newEmbed = '';
+				switch (linkFormat) {
+					case 'markdown':
+						newEmbed = isImage ? `![](${embedPath})` : `[${embedPath}](${embedPath})`;
+						break;
+					case 'html':
+						newEmbed = isImage ? `<img src="${embedPath}" alt="">` : `<a href="${embedPath}">${embedPath}</a>`;
+						break;
+					case 'wiki':
+					default:
+						newEmbed = `![[${embedPath}]]`;
+				}
+
+				convertedContent = convertedContent.replace(originalEmbed, newEmbed);
+			});
+		}
+
+		return convertedContent;
+	}
 
 	async onload() {
 		await this.loadSettings();
@@ -64,7 +122,7 @@ export default class MarkdownExportPlugin extends Plugin {
 		console.log(`开始导出文档包，源文件：${file.path}`);
 
 		// 创建导出目录
-		const exportFolderPath = `${file.parent.path}/${this.settings.exportPath}`;
+		const exportFolderPath = normalizePath(`${file.parent.path}/${this.settings.exportPath}`);
 		try {
 			console.log(`正在创建导出目录：${exportFolderPath}`);
 			await this.app.vault.adapter.mkdir(exportFolderPath);
@@ -100,10 +158,16 @@ export default class MarkdownExportPlugin extends Plugin {
 
 		console.log(`文档分析完成，发现 ${links.size} 个链接和嵌入`);
 
-		// 复制主文档
-		console.log(`正在复制主文档到：${exportFolderPath}/${file.name}`);
-		await this.app.vault.adapter.copy(file.path, `${exportFolderPath}/${file.name}`);
-		console.log('主文档复制完成');
+		// 读取主文档内容
+		console.log(`正在处理主文档：${file.path}`);
+		let content = await this.app.vault.read(file);
+
+		// 转换文档中的链接格式
+		content = this.convertLinks(content, fileCache, links);
+
+		// 写入转换后的文档
+		await this.app.vault.adapter.write(`${exportFolderPath}/${file.name}`, content);
+		console.log('主文档处理完成');
 
 		// 复制链接的文件和附件
 		let successCount = 0;
@@ -168,6 +232,19 @@ class ExportPackSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.exportPath)
 				.onChange(async (value) => {
 					this.plugin.settings.exportPath = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('链接格式')
+			.setDesc('选择导出文档中的链接格式')
+			.addDropdown(dropdown => dropdown
+				.addOption('wiki', 'Wiki链接 [[文件名]]')
+				.addOption('markdown', 'Markdown链接 [文件名](路径)')
+				.addOption('html', 'HTML链接 <a href="路径">文件名</a>')
+				.setValue(this.plugin.settings.linkFormat)
+				.onChange(async (value: 'wiki' | 'markdown' | 'html') => {
+					this.plugin.settings.linkFormat = value;
 					await this.plugin.saveSettings();
 				}));
 	}
