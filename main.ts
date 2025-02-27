@@ -2,84 +2,140 @@ import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Set
 
 // Remember to rename these classes and interfaces!
 
-interface MyPluginSettings {
-	mySetting: string;
+interface ExportPackSettings {
+	exportPath: string;
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+const DEFAULT_SETTINGS: ExportPackSettings = {
+	exportPath: 'exports'
 }
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class MarkdownExportPlugin extends Plugin {
+	settings: ExportPackSettings;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
-		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
-
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
+		// 添加导出命令
 		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
+			id: 'export-markdown-pack',
+			name: '导出Markdown文档包',
 			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
+				const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (activeView) {
 					if (!checking) {
-						new SampleModal(this.app).open();
+						this.exportMarkdownPack(activeView);
 					}
-
-					// This command will only show up in Command Palette when the check function returns true
 					return true;
 				}
+				return false;
 			}
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
+		// 添加功能图标到左侧栏
+		const ribbonIconEl = this.addRibbonIcon('package', 'Export Markdown Pack', async () => {
+			const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+			if (activeView) {
+				await this.exportMarkdownPack(activeView);
+			} else {
+				new Notice('请先打开一个Markdown文件！');
+			}
 		});
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		// 添加设置选项
+		this.addSettingTab(new ExportPackSettingTab(this.app, this));
+
+		// 添加状态栏
+		const statusBarItemEl = this.addStatusBarItem();
+		statusBarItemEl.setText('导出准备就绪');
 	}
 
 	onunload() {
+	}
 
+	async exportMarkdownPack(view: MarkdownView) {
+		const file = view.file;
+		if (!file) {
+			console.log('导出失败：未能获取当前文件信息');
+			new Notice('无法获取当前文件信息');
+			return;
+		}
+
+		console.log(`开始导出文档包，源文件：${file.path}`);
+
+		// 创建导出目录
+		const exportFolderPath = `${file.parent.path}/${this.settings.exportPath}`;
+		try {
+			console.log(`正在创建导出目录：${exportFolderPath}`);
+			await this.app.vault.adapter.mkdir(exportFolderPath);
+			console.log('导出目录创建成功');
+		} catch (error) {
+			console.log('目录已存在或创建失败', error);
+		}
+
+		// 获取文档的元数据缓存
+		const fileCache = this.app.metadataCache.getFileCache(file);
+		if (!fileCache) {
+			console.log('无法获取文件的元数据缓存');
+			new Notice('导出失败：无法获取文件的元数据信息');
+			return;
+		}
+
+		// 收集所有链接和嵌入
+		const links = new Set<string>();
+		
+		// 处理内部链接
+		if (fileCache.links) {
+			fileCache.links.forEach(link => {
+				if (link.link) links.add(link.link);
+			});
+		}
+
+		// 处理嵌入文件（包括图片）
+		if (fileCache.embeds) {
+			fileCache.embeds.forEach(embed => {
+				if (embed.link) links.add(embed.link);
+			});
+		}
+
+		console.log(`文档分析完成，发现 ${links.size} 个链接和嵌入`);
+
+		// 复制主文档
+		console.log(`正在复制主文档到：${exportFolderPath}/${file.name}`);
+		await this.app.vault.adapter.copy(file.path, `${exportFolderPath}/${file.name}`);
+		console.log('主文档复制完成');
+
+		// 复制链接的文件和附件
+		let successCount = 0;
+		let failCount = 0;
+
+		for (const link of links) {
+			try {
+				const linkedFile = this.app.metadataCache.getFirstLinkpathDest(link, file.path);
+				if (linkedFile) {
+					// 保持相对路径结构
+					const relativePath = linkedFile.path.replace(linkedFile.parent.path + '/', '');
+					const targetPath = `${exportFolderPath}/${relativePath}`;
+					
+					// 确保目标目录存在
+					const targetDir = targetPath.substring(0, targetPath.lastIndexOf('/'));
+					await this.app.vault.adapter.mkdir(targetDir);
+
+					console.log(`正在复制链接文件：${link} -> ${targetPath}`);
+					await this.app.vault.adapter.copy(linkedFile.path, targetPath);
+					successCount++;
+				} else {
+					console.log(`未找到链接文件：${link}`);
+					failCount++;
+				}
+			} catch (error) {
+				console.error(`复制文件失败: ${link}`, error);
+				failCount++;
+			}
+		}
+
+		console.log(`导出完成：成功 ${successCount} 个，失败 ${failCount} 个`);
+		new Notice(`文档包已导出到 ${exportFolderPath}`);
 	}
 
 	async loadSettings() {
@@ -91,26 +147,10 @@ export default class MyPlugin extends Plugin {
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
+class ExportPackSettingTab extends PluginSettingTab {
+	plugin: MarkdownExportPlugin;
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
-	}
-
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
-	}
-}
-
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
-
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: MarkdownExportPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
@@ -121,13 +161,13 @@ class SampleSettingTab extends PluginSettingTab {
 		containerEl.empty();
 
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
+			.setName('导出路径')
+			.setDesc('设置导出文件包的存储路径（相对于当前文档所在目录）')
 			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+				.setPlaceholder('exports')
+				.setValue(this.plugin.settings.exportPath)
 				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
+					this.plugin.settings.exportPath = value;
 					await this.plugin.saveSettings();
 				}));
 	}
